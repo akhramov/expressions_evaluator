@@ -1,0 +1,11 @@
+{
+  "variables": {
+    "A": true,
+    "B": false,
+    "C": false,
+    "D": 1.05,
+    "E": 1,
+    "F": 1
+  },
+  "additional_rules": [],
+}

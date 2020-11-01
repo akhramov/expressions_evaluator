@@ -1,0 +1,230 @@
+* Expressions evaluator
+
+** What is it?
+
+*** Expressions
+There are two types of expressions.
+
+Boolean ones take the form of ~A && B && !C => H = M~, effectively
+meaning that if the thing on the left side of ~=>~ evaluates to true,
+then the result of the expression is ~M~.
+
+Arithmetic ones rely on the result of boolean expressions evaluation.
+They take form of ~H = P => K = D + (D * (E - F) / 25.5)~. Think of
+good-old conditionals. Translated to human language, the expression
+above could be read as "If there's a boolean expression evaluated to
+P, then the result is a float number equal to ~D + (D * (E - F) /
+25.5)~".
+
+*** The purpose of this program.
+This application solves a simple task: given a set of boolean and
+arithmetic expressions, find a boolean & arithmetic expressions that'd
+yield a solution and evaluate them.
+
+Users may supply variable bindings & additional expressions.
+
+
+
+** Usage
+
+*** Installation
+
+The only prerequisites are rustup & cargo. Visit https://rustup.rs/
+for installation instructions.
+
+1. Fetch the latest code
+  #+BEGIN_SRC sh
+  git pull https://github.com/akhramov/expressions_evaluator
+  #+END_SRC
+
+2. Set up nightly Rust
+  This application is powered by Rocket web-framework which requires a
+  nightly version of Rust. Within the cloned repository, run the
+  following.
+
+  #+BEGIN_SRC sh
+  rustup toolchain install nightly
+  rustup override set nightly
+  #+END_SRC
+
+3. (Optional) Build the project
+  You may omit ~--release~ parameter, if you need a debug binary.
+
+  #+BEGIN_SRC sh
+  cargo build --release
+  #+END_SRC
+
+
+*** Running
+
+**** Launching the application
+
+You may either run the binary compiled at the installation phase, or
+use ~cargo~. As usual, omit ~--release~ parameter if you want.
+
+#+BEGIN_SRC sh
+cargo run --release
+#+END_SRC
+
+**** Interacting with the API
+
+The API is pretty simple and consist of a single endpoint:
+
+#+BEGIN_SRC
+POST /solution
+
+{
+  "variables": {
+    "A": true,
+    "B": true,
+    "C": false,
+    "D": 1.05,
+    "E": 1,
+    "F": 1
+  },
+  "additional_rules": [
+    "A && B => H = P"
+  ]
+}
+#+END_SRC
+
+The body of the request is a JSON-formatted object, consisting of two
+keys:
+
+    - ~variables~. You must supply a value for all variables. Values
+      of ~A~, ~B~ and ~C~ are boolean, ~D~ is float, ~E~ and ~F~ are
+      integers.
+
+    - ~additional_rules~. You may add additional expressions using
+      this array.
+
+
+*Examples*
+
+If you want to play around with predefined payloads, please see
+[[./src/http_server/test_fixtures]]. For example,
+
+The following will send a correct payload to the server:
+
+#+BEGIN_SRC sh
+curl -X POST http://localhost:8000/solution --data-binary '@./src/http_server/test_fixtures/happy_path.json'
+#+END_SRC
+
+Will result to
+
+#+BEGIN_SRC json
+{"H":"P","K":1.05}
+#+END_SRC
+
+The following introduces an expression with an unbound variable:
+
+#+BEGIN_SRC sh
+curl -X POST http://localhost:8000/solution --data-binary '@./src/http_server/test_fixtures/unknown_variable.json'
+#+END_SRC
+
+And results to HTTP 422 with body equals to
+
+#+BEGIN_SRC json
+{"reason":"Variable UNKNOWN is undefined"}
+#+END_SRC
+
+** Design & Implemenation
+
+For brevity, the overall architecture and implementation details are
+best described illustratively, using the flow diagram depicted below.
+
+Please find the corresponding comments & notes on each element right
+under the diagram.
+
+
+#+BEGIN_SRC
+    -----
+   (     )                  +--------------+              +---------------+             +-------------+
+    --+--                   |              |              |               |             |             |
+      |                     |   Rocket     |              |   Solver [3]  |             | Parsers [4] |
+  ----+-----    -------->   | Handler [2]  | ---------->  |               | --------->  |             |
+      |     HTTP POST [1]   |              |              |               |             |             |
+      |                     +--------------+              +---------------+             +-------------+
+      X
+     / \
+    /   \
+   /     \
+#+END_SRC
+
+- HTTP POST [1]
+
+  This library uses Rocket framework to handle HTTP requests.
+  There's a single route: ~POST /solution~, which is not quite
+  RESTful, because it does not represent a resource. Nonetheless, HTTP
+  semantics still hold. The application will respond with 422 wherever
+  needed. This is handled by ~Rocket Handler [2]~.
+
+- Rocket Handler [2]
+
+  The HTTP request is handled by a Rocket-backed route handler, which
+  interacts with the ~Solver [3]~.
+
+  The sole purpose of the handler is to convert the request data into
+  the representation suitable for Solver. Solver is agnostic to the
+  business rules (a set of variables A-D, their types and so forth).
+
+  Once data is converted, the handler ask Solver to resolve the set of
+  equations and responds the user accordingly.
+
+  The business rules are enforced on this layer mainly through the
+  typed deserialization using ~serde~.
+
+- Solver [3]
+
+  - Stores a list of basic expressions
+  - Provides a facility to add additional expressions.
+
+    Before the addition, Solver parses the expression using one of two
+    ~Parsers [4]~. First, it tries to parse the expression as boolean
+    expression. If it fails, it tries the arithmetic expression parser.
+
+    If none succeeds, likely user provided an invalid parser and we
+    cannot proceed any further. This situation is signaled using the
+    standard ~Result~-based approach.
+
+    The result of parsing is AST, which is ready for evaluation. Read
+    on for details.
+
+
+- Parsers [4]
+  The backbone of the application is [[https://github.com/Geal/nom][nom]], a parser framework.
+
+  The biggest trick used here is based on the fact that both boolean
+  (~A && !B~) and arithmetic (~A + B + 0.25~) expressions are
+  infix forms. That means, they can be parsed almost the same way.
+
+  Only things that differ are basics: variables & constants. For
+  instance, booleans have the unary negation operator arithmetics
+  lacks.
+
+  Keeping that in mind, I was able to boil down parsers generation to
+  a couple of macros invocations:
+
+  For booleans:
+
+  #+BEGIN_SRC rust
+  expression!(Expression<bool, Factor> | ExpressionOperator: And => &&, Or => ||);
+  #+END_SRC
+
+  For arithmetics:
+
+  #+BEGIN_SRC rust
+  // Represents a term, which can consists of one, or multiple factors which
+  // can be divided or multiplied.
+  expression!(Term<f64, Factor> | TermOperator: Multiply => *, Divide => /);
+
+  // Represents an expression, which can consists of one, or multiple terms
+  // which can be added or subtracted.
+  expression!(Expression<f64, Term> | ExpressionOperator: Add => +, Subtract => -);
+  #+END_SRC
+
+  Pretty neat, but I'm not proud of that.
+
+  As for basic things, constants & variables, the arithmetics parser
+  is a little bit more complicated due to bracketed expressions. This
+  is solved by boxed recursive types in the AST.
